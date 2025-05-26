@@ -108,7 +108,7 @@ Quasar uses a **global autograd engine** architecture similar to PyTorch:
 └─────────────────┘    └──────────────────┘    │ • Gradient      │
                                                │   computation   │
 ┌─────────────────┐    ┌──────────────────┐    └─────────────────┘
-│  Memory Layer   │    │   SIMD Ops      │
+│  Memory Layer   │    │   SIMD Ops       │
 │                 │    │                  │
 │ • Aligned alloc │    │ • Vectorized     │
 │ • Zero-copy     │    │ • CPU optimized  │
@@ -127,15 +127,7 @@ Check out the `examples/` directory for more comprehensive examples:
 
 ## 🔬 Benchmarks
 
-Quasar is designed for performance. Here are some preliminary benchmarks:
-
-| Operation | Quasar (Rust) | PyTorch (Python) | Speedup |
-|-----------|---------------|------------------|---------|
-| Matrix Mul (1000x1000) | 2.3ms | 8.7ms | 3.8x |
-| Element-wise Add | 0.1ms | 0.4ms | 4.0x |
-| Backward Pass | 1.2ms | 3.1ms | 2.6x |
-
-*Benchmarks run on Intel i7-12700K, single-threaded*
+TODO!
 
 ## 🛠️ Development
 
