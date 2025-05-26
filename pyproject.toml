@@ -1,0 +1,113 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "quasar"
+description = "High-performance autograd engine in Rust with Python bindings"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Quasar Contributors" },
+]
+keywords = ["machine-learning", "autograd", "tensor", "deep-learning", "rust"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-benchmark",
+    "black",
+    "isort",
+    "mypy",
+    "torch>=1.12.0",  # For benchmarking
+]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+    "myst-parser",
+]
+jupyter = [
+    "jupyter",
+    "matplotlib",
+    "seaborn",
+]
+
+[project.urls]
+Homepage = "https://github.com/Raumberg/quasar"
+Documentation = "https://quasar.readthedocs.io"
+Repository = "https://github.com/Raumberg/quasar"
+"Bug Tracker" = "https://github.com/Raumberg/quasar/issues"
+Changelog = "https://github.com/Raumberg/quasar/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+python-source = "python"
+module-name = "quasar._quasar"
+features = ["pyo3/extension-module"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "quasar._quasar",  # Rust extension module
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests that require GPU",
+    "benchmark: marks benchmark tests",
+] 

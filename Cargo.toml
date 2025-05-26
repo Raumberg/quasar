@@ -1,0 +1,41 @@
+[package]
+name = "quasar"
+version = "0.1.0"
+edition = "2024"
+authors = ["Raumberg"]
+description = "A blazingly fast autograd engine written in Rust with assembly optimizations"
+license = "MIT"
+repository = "https://github.com/Raumberg/quasar"
+keywords = ["machine-learning", "autograd", "tensor", "neural-networks", "simd"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+rayon = { version = "1.8", optional = true }
+num-traits = "0.2"
+rand = "0.8"
+bytemuck = "1.14"
+thiserror = "1.0"
+
+[dev-dependencies]
+criterion = "0.5"
+approx = "0.5"
+
+[features]
+default = ["simd", "parallel"]
+simd = []
+parallel = ["rayon"]
+gpu = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[[bench]]
+name = "basic_ops"
+harness = false 
