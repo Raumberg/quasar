@@ -99,7 +99,7 @@ impl<T: TensorElement> AutogradOp<T> for MatMulOp {
 }
 
 /// Helper: multiply A * B^T
-fn matmul_transpose_rhs<T: TensorElement>(a: &Tensor<T>, b: &Tensor<T>) -> Result<Tensor<T>> {
+pub fn matmul_transpose_rhs<T: TensorElement>(a: &Tensor<T>, b: &Tensor<T>) -> Result<Tensor<T>> {
     let a_dims = a.shape().dims();
     let b_dims = b.shape().dims();
     
@@ -130,7 +130,7 @@ fn matmul_transpose_rhs<T: TensorElement>(a: &Tensor<T>, b: &Tensor<T>) -> Resul
 }
 
 /// Helper: multiply A^T * B
-fn matmul_transpose_lhs<T: TensorElement>(a: &Tensor<T>, b: &Tensor<T>) -> Result<Tensor<T>> {
+pub fn matmul_transpose_lhs<T: TensorElement>(a: &Tensor<T>, b: &Tensor<T>) -> Result<Tensor<T>> {
     let a_dims = a.shape().dims();
     let b_dims = b.shape().dims();
     
