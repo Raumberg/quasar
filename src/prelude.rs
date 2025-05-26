@@ -9,9 +9,14 @@ pub use crate::ops::*;
 
 // Autograd
 pub use crate::autograd::{Variable, AutogradFunction, AutogradOp, AddOp, MulOp};
+pub use crate::autograd::engine::with_global_engine;
 
 // Memory
 pub use crate::memory::AlignedVec;
 
 // Backend
-pub use crate::backend::CpuBackend; 
+pub use crate::backend::CpuBackend;
+
+// New operations
+pub use crate::ops::activation::{ReLUOp, relu};
+pub use crate::ops::linalg::{MatMulOp, matmul}; 

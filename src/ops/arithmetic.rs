@@ -180,7 +180,7 @@ fn create_gradient_function_with_flags<T: TensorElement>(
     input_b: Tensor<T>,
     a_requires_grad: bool,
     b_requires_grad: bool,
-) -> Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>>> {
+) -> Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>> + Send + Sync> {
     Box::new(move |grad_output: &Tensor<T>, _inputs: &[&Tensor<T>]| -> Result<Vec<Tensor<T>>> {
         // Use saved inputs instead of the ones passed from graph
         let saved_inputs = vec![&input_a, &input_b];

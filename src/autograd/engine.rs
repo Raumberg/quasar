@@ -4,17 +4,25 @@ use crate::core::{Tensor, TensorElement};
 use crate::error::{QuasarError, Result};
 use crate::autograd::graph::{ComputationGraph, NodeId, Operation};
 use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex, Arc, OnceLock};
 use std::any::TypeId;
 
-/// Global autograd engines storage
-static mut GLOBAL_ENGINES: Option<GlobalEngines> = None;
-static INIT: std::sync::Once = std::sync::Once::new();
+/// Global autograd engines storage - thread-safe initialization
+static GLOBAL_ENGINES: OnceLock<GlobalEngines> = OnceLock::new();
 
 /// Container for all global engines
 struct GlobalEngines {
     f32_engine: Arc<Mutex<AutogradEngine<f32>>>,
     f64_engine: Arc<Mutex<AutogradEngine<f64>>>,
+}
+
+impl GlobalEngines {
+    fn new() -> Self {
+        Self {
+            f32_engine: Arc::new(Mutex::new(AutogradEngine::new())),
+            f64_engine: Arc::new(Mutex::new(AutogradEngine::new())),
+        }
+    }
 }
 
 /// Main autograd engine
@@ -74,7 +82,7 @@ impl<T: TensorElement> AutogradEngine<T> {
         operation: Operation<T>,
         input_nodes: Vec<NodeId>,
         output: Tensor<T>,
-        grad_fn: Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>>>,
+        grad_fn: Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>> + Send + Sync>,
     ) -> Result<NodeId> {
         if !self.enabled {
             return Err(QuasarError::invalid_operation("Autograd is disabled"));
@@ -122,34 +130,19 @@ pub struct AutogradStats {
     pub enabled: bool,
 }
 
-/// Initialize global engines
-fn init_global_engines() {
-    unsafe {
-        INIT.call_once(|| {
-            GLOBAL_ENGINES = Some(GlobalEngines {
-                f32_engine: Arc::new(Mutex::new(AutogradEngine::new())),
-                f64_engine: Arc::new(Mutex::new(AutogradEngine::new())),
-            });
-        });
-    }
-}
-
 /// Get global engine for type T
 pub fn get_global_engine<T: TensorElement>() -> Arc<Mutex<AutogradEngine<T>>> {
-    init_global_engines();
+    let engines = GLOBAL_ENGINES.get_or_init(GlobalEngines::new);
     
-    unsafe {
-        let global_engines_ptr = std::ptr::addr_of!(GLOBAL_ENGINES);
-        let engines = (*global_engines_ptr).as_ref().unwrap();
-        
-        if TypeId::of::<T>() == TypeId::of::<f32>() {
-            std::mem::transmute(engines.f32_engine.clone())
-        } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-            std::mem::transmute(engines.f64_engine.clone())
-        } else {
-            // For other types, create a new engine (shouldn't happen in practice)
-            Arc::new(Mutex::new(AutogradEngine::new()))
-        }
+    if TypeId::of::<T>() == TypeId::of::<f32>() {
+        // SAFETY: We've checked the type ID matches f32
+        unsafe { std::mem::transmute(engines.f32_engine.clone()) }
+    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
+        // SAFETY: We've checked the type ID matches f64
+        unsafe { std::mem::transmute(engines.f64_engine.clone()) }
+    } else {
+        // For other types, create a new engine (shouldn't happen in practice)
+        Arc::new(Mutex::new(AutogradEngine::new()))
     }
 }
 
@@ -164,7 +157,7 @@ where
 }
 
 /// Autograd operation trait
-pub trait AutogradOp<T: TensorElement> {
+pub trait AutogradOp<T: TensorElement>: Send + Sync {
     /// Forward pass
     fn forward(&self, inputs: &[&Tensor<T>]) -> Result<Tensor<T>>;
     

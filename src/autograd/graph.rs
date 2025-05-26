@@ -3,9 +3,65 @@
 use crate::core::{Tensor, TensorElement};
 use crate::error::{QuasarError, Result};
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 /// Unique identifier for nodes in the computational graph
 pub type NodeId = usize;
+
+/// Configuration for graph lifecycle management
+#[derive(Debug, Clone)]
+pub struct GraphConfig {
+    /// Maximum number of nodes before triggering cleanup
+    pub max_nodes: usize,
+    /// Maximum age of unused nodes before cleanup (in seconds)
+    pub max_node_age_secs: u64,
+    /// Enable automatic garbage collection
+    pub auto_gc: bool,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            max_nodes: 10000,
+            max_node_age_secs: 300, // 5 minutes
+            auto_gc: true,
+        }
+    }
+}
+
+/// Metadata for graph nodes
+#[derive(Debug)]
+struct NodeMetadata {
+    /// When this node was created
+    created_at: Instant,
+    /// When this node was last accessed
+    last_accessed: Instant,
+    /// Reference count (how many other nodes depend on this)
+    ref_count: usize,
+}
+
+impl NodeMetadata {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            created_at: now,
+            last_accessed: now,
+            ref_count: 0,
+        }
+    }
+
+    fn touch(&mut self) {
+        self.last_accessed = Instant::now();
+    }
+
+    fn age(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
+    fn idle_time(&self) -> Duration {
+        self.last_accessed.elapsed()
+    }
+}
 
 /// Computational graph node
 pub struct ComputationNode<T: TensorElement> {
@@ -18,7 +74,9 @@ pub struct ComputationNode<T: TensorElement> {
     /// Output tensor stored directly
     pub output: Tensor<T>,
     /// Gradient function for backward pass
-    pub grad_fn: Option<Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>>>>,
+    pub grad_fn: Option<Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>> + Send + Sync>>,
+    /// Node metadata for lifecycle management
+    metadata: NodeMetadata,
 }
 
 /// Types of operations in the computational graph
@@ -54,6 +112,8 @@ pub struct ComputationGraph<T: TensorElement> {
     leaf_nodes: HashSet<NodeId>,
     /// Gradient storage for each node
     gradients: HashMap<NodeId, Tensor<T>>,
+    /// Configuration for graph lifecycle management
+    config: GraphConfig,
 }
 
 impl<T: TensorElement> ComputationGraph<T> {
@@ -64,6 +124,18 @@ impl<T: TensorElement> ComputationGraph<T> {
             next_id: 0,
             leaf_nodes: HashSet::new(),
             gradients: HashMap::new(),
+            config: GraphConfig::default(),
+        }
+    }
+
+    /// Create new computational graph with custom config
+    pub fn with_config(config: GraphConfig) -> Self {
+        Self {
+            nodes: HashMap::new(),
+            next_id: 0,
+            leaf_nodes: HashSet::new(),
+            gradients: HashMap::new(),
+            config,
         }
     }
 
@@ -78,6 +150,7 @@ impl<T: TensorElement> ComputationGraph<T> {
             inputs: Vec::new(),
             output: tensor,
             grad_fn: None,
+            metadata: NodeMetadata::new(),
         };
 
         self.nodes.insert(id, node);
@@ -104,7 +177,7 @@ impl<T: TensorElement> ComputationGraph<T> {
         operation: Operation<T>,
         inputs: Vec<NodeId>,
         output: Tensor<T>,
-        grad_fn: Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>>>,
+        grad_fn: Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>> + Send + Sync>,
     ) -> NodeId {
         let id = self.next_id;
         self.next_id += 1;
@@ -115,6 +188,7 @@ impl<T: TensorElement> ComputationGraph<T> {
             inputs,
             output,
             grad_fn: Some(grad_fn),
+            metadata: NodeMetadata::new(),
         };
 
         self.nodes.insert(id, node);
@@ -272,10 +346,118 @@ impl<T: TensorElement> ComputationGraph<T> {
         self.gradients.clear();
         self.next_id = 0;
     }
+
+    /// Perform automatic garbage collection if needed
+    pub fn maybe_gc(&mut self) {
+        if !self.config.auto_gc {
+            return;
+        }
+
+        // Check if we need to trigger GC
+        let should_gc = self.nodes.len() > self.config.max_nodes ||
+                       self.has_old_nodes();
+
+        if should_gc {
+            self.garbage_collect();
+        }
+    }
+
+    /// Check if there are old unused nodes
+    fn has_old_nodes(&self) -> bool {
+        let max_age = Duration::from_secs(self.config.max_node_age_secs);
+        self.nodes.values().any(|node| {
+            node.metadata.ref_count == 0 && node.metadata.idle_time() > max_age
+        })
+    }
+
+    /// Perform garbage collection - remove unused old nodes
+    pub fn garbage_collect(&mut self) {
+        let max_age = Duration::from_secs(self.config.max_node_age_secs);
+        let mut to_remove = Vec::new();
+
+        // Update reference counts first
+        self.update_ref_counts();
+
+        // Find nodes to remove
+        for (id, node) in &self.nodes {
+            // Don't remove leaf nodes or recently used nodes
+            if self.leaf_nodes.contains(id) {
+                continue;
+            }
+
+            // Remove if old and unused
+            if node.metadata.ref_count == 0 && node.metadata.idle_time() > max_age {
+                to_remove.push(*id);
+            }
+        }
+
+        // Remove nodes
+        for id in to_remove {
+            self.nodes.remove(&id);
+            self.gradients.remove(&id);
+        }
+    }
+
+    /// Update reference counts for all nodes
+    fn update_ref_counts(&mut self) {
+        // Reset all ref counts
+        for node in self.nodes.values_mut() {
+            node.metadata.ref_count = 0;
+        }
+
+        // Collect all input dependencies first
+        let mut ref_counts: HashMap<NodeId, usize> = HashMap::new();
+        for node in self.nodes.values() {
+            for &input_id in &node.inputs {
+                *ref_counts.entry(input_id).or_insert(0) += 1;
+            }
+        }
+
+        // Update ref counts
+        for (node_id, count) in ref_counts {
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                node.metadata.ref_count = count;
+            }
+        }
+    }
+
+    /// Get graph statistics including memory usage
+    pub fn graph_stats(&self) -> GraphStats {
+        let total_nodes = self.nodes.len();
+        let leaf_nodes = self.leaf_nodes.len();
+        let gradient_nodes = self.gradients.len();
+        
+        let old_nodes = self.nodes.values()
+            .filter(|node| {
+                let max_age = Duration::from_secs(self.config.max_node_age_secs);
+                node.metadata.idle_time() > max_age
+            })
+            .count();
+
+        GraphStats {
+            total_nodes,
+            leaf_nodes,
+            gradient_nodes,
+            old_nodes,
+            next_id: self.next_id,
+            config: self.config.clone(),
+        }
+    }
 }
 
 impl<T: TensorElement> Default for ComputationGraph<T> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Statistics about the computational graph
+#[derive(Debug, Clone)]
+pub struct GraphStats {
+    pub total_nodes: usize,
+    pub leaf_nodes: usize,
+    pub gradient_nodes: usize,
+    pub old_nodes: usize,
+    pub next_id: NodeId,
+    pub config: GraphConfig,
 } 

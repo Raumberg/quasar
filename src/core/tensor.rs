@@ -5,26 +5,21 @@ use crate::memory::AlignedVec;
 use crate::error::{QuasarError, Result};
 use crate::autograd::engine::{with_global_engine};
 use std::fmt;
+use std::sync::Arc;
 
-/// Main tensor structure
-pub struct Tensor<T: TensorElement> {
+/// Shared tensor data for copy-on-write optimization
+#[derive(Debug)]
+struct TensorData<T: TensorElement> {
     /// Tensor data stored in SIMD-aligned memory
     data: AlignedVec<T>,
     /// Shape of the tensor
     shape: Shape,
     /// Data type
     dtype: DType,
-    /// Whether this tensor requires gradients
-    requires_grad: bool,
-    /// Gradient tensor (computed during backward pass)
-    grad: Option<Box<Tensor<T>>>,
-    /// Node ID in computational graph
-    node_id: Option<usize>,
 }
 
-impl<T: TensorElement> Tensor<T> {
-    /// Create new tensor with given shape and data
-    pub fn new(data: Vec<T>, shape: Shape) -> Result<Self> {
+impl<T: TensorElement> TensorData<T> {
+    fn new(data: Vec<T>, shape: Shape) -> Result<Self> {
         let total_elements = shape.total_elements();
         if data.len() != total_elements {
             return Err(QuasarError::invalid_operation(
@@ -37,6 +32,29 @@ impl<T: TensorElement> Tensor<T> {
             data: AlignedVec::from_vec(data)?,
             shape,
             dtype: DType::from_type::<T>(),
+        })
+    }
+}
+
+/// Main tensor structure with copy-on-write optimization
+pub struct Tensor<T: TensorElement> {
+    /// Shared tensor data (copy-on-write)
+    data: Arc<TensorData<T>>,
+    /// Whether this tensor requires gradients
+    requires_grad: bool,
+    /// Gradient tensor (computed during backward pass)
+    grad: Option<Box<Tensor<T>>>,
+    /// Node ID in computational graph
+    node_id: Option<usize>,
+}
+
+impl<T: TensorElement> Tensor<T> {
+    /// Create new tensor with given shape and data
+    pub fn new(data: Vec<T>, shape: Shape) -> Result<Self> {
+        let tensor_data = TensorData::new(data, shape)?;
+        
+        Ok(Self {
+            data: Arc::new(tensor_data),
             requires_grad: false,
             grad: None,
             node_id: None,
@@ -59,14 +77,7 @@ impl<T: TensorElement> Tensor<T> {
 
     /// Create scalar tensor
     pub fn from_scalar(value: T) -> Self {
-        Self {
-            data: AlignedVec::from_vec(vec![value]).expect("Failed to create scalar tensor"),
-            shape: Shape::scalar(),
-            dtype: DType::from_type::<T>(),
-            requires_grad: false,
-            grad: None,
-            node_id: None,
-        }
+        Self::new(vec![value], Shape::scalar()).expect("Failed to create scalar tensor")
     }
 
     /// Set whether this tensor requires gradients
@@ -82,36 +93,65 @@ impl<T: TensorElement> Tensor<T> {
 
     /// Get tensor shape
     pub fn shape(&self) -> &Shape {
-        &self.shape
+        &self.data.shape
     }
 
     /// Get tensor data type
     pub fn dtype(&self) -> DType {
-        self.dtype
+        self.data.dtype
     }
 
     /// Get tensor data as slice
     pub fn data(&self) -> &[T] {
-        self.data.as_slice()
+        self.data.data.as_slice()
     }
 
-    /// Get mutable tensor data
+    /// Get mutable tensor data (triggers copy-on-write if shared)
     pub fn data_mut(&mut self) -> &mut [T] {
-        self.data.as_mut_slice()
+        // If the data is shared (Arc::strong_count > 1), we need to clone it
+        if Arc::strong_count(&self.data) > 1 {
+            let cloned_data = TensorData {
+                data: AlignedVec::from_vec(self.data.data.as_slice().to_vec()).unwrap(),
+                shape: self.data.shape.clone(),
+                dtype: self.data.dtype,
+            };
+            self.data = Arc::new(cloned_data);
+        }
+        
+        // SAFETY: We just ensured that we have exclusive access to the data
+        unsafe {
+            let ptr = Arc::as_ptr(&self.data) as *mut TensorData<T>;
+            (*ptr).data.as_mut_slice()
+        }
+    }
+
+    /// Check if tensor data is shared
+    pub fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.data) > 1
+    }
+
+    /// Get reference count for debugging
+    pub fn ref_count(&self) -> usize {
+        Arc::strong_count(&self.data)
     }
 
     /// Reshape tensor
     pub fn reshape(&self, new_shape: Shape) -> Result<Self> {
-        if new_shape.total_elements() != self.shape.total_elements() {
+        if new_shape.total_elements() != self.shape().total_elements() {
             return Err(QuasarError::shape_mismatch(
-                &[self.shape.total_elements()], &[new_shape.total_elements()]
+                &[self.shape().total_elements()], &[new_shape.total_elements()]
             ));
         }
 
-        Ok(Self {
-            data: self.data.clone(),
+        // Create new tensor data with reshaped dimensions
+        let new_data = TensorData {
+            data: AlignedVec::from_vec(self.data().to_vec())?,
             shape: new_shape,
-            dtype: self.dtype,
+            dtype: self.data.dtype,
+        };
+
+        Ok(Self {
+            data: Arc::new(new_data),
             requires_grad: self.requires_grad,
             grad: None,
             node_id: self.node_id,
@@ -120,21 +160,21 @@ impl<T: TensorElement> Tensor<T> {
 
     /// Get single item from tensor (for scalars or single-element tensors)
     pub fn item(&self) -> Result<T> {
-        if self.data.len() != 1 {
+        if self.data().len() != 1 {
             return Err(QuasarError::invalid_operation(
                 "item() can only be called on tensors with exactly one element"
             ));
         }
-        Ok(self.data[0])
+        Ok(self.data()[0])
     }
 
     /// Get item at specific indices
     pub fn item_at(&self, indices: &[usize]) -> Result<T> {
-        let flat_index = self.shape.indices_to_flat(indices)?;
-        if flat_index >= self.data.len() {
-            return Err(QuasarError::index_out_of_bounds(flat_index, self.data.len()));
+        let flat_index = self.shape().indices_to_flat(indices)?;
+        if flat_index >= self.data().len() {
+            return Err(QuasarError::index_out_of_bounds(flat_index, self.data().len()));
         }
-        Ok(self.data[flat_index])
+        Ok(self.data()[flat_index])
     }
 
     /// Get gradient tensor
@@ -165,7 +205,7 @@ impl<T: TensorElement> Tensor<T> {
 
         if let Some(node_id) = self.node_id {
             // Create gradient tensor (ones with same shape as output)
-            let grad_output = Tensor::ones(self.shape.clone())?;
+            let grad_output = Tensor::ones(self.shape().clone())?;
             
             // Execute backward pass using global engine
             with_global_engine::<T, _, _>(|engine| {
@@ -191,17 +231,17 @@ impl<T: TensorElement> Tensor<T> {
 
     /// Check if tensor is scalar
     pub fn is_scalar(&self) -> bool {
-        self.shape.is_scalar()
+        self.shape().is_scalar()
     }
 
     /// Get number of dimensions
     pub fn ndim(&self) -> usize {
-        self.shape.ndim()
+        self.shape().ndim()
     }
 
     /// Get total number of elements
     pub fn numel(&self) -> usize {
-        self.shape.total_elements()
+        self.shape().total_elements()
     }
 
     /// Get node ID in computational graph (internal use)
@@ -220,8 +260,6 @@ impl<T: TensorElement> Clone for Tensor<T> {
     fn clone(&self) -> Self {
         Self {
             data: self.data.clone(),
-            shape: self.shape.clone(),
-            dtype: self.dtype,
             requires_grad: self.requires_grad,
             grad: self.grad.clone(),
             node_id: self.node_id,
@@ -233,10 +271,10 @@ impl<T: TensorElement> Clone for Tensor<T> {
 impl<T: TensorElement> fmt::Debug for Tensor<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tensor")
-            .field("shape", &self.shape)
-            .field("dtype", &self.dtype)
+            .field("shape", &self.shape())
+            .field("dtype", &self.dtype())
             .field("requires_grad", &self.requires_grad)
-            .field("data", &self.data.as_slice())
+            .field("data", &self.data())
             .finish()
     }
 }
@@ -245,19 +283,19 @@ impl<T: TensorElement> fmt::Debug for Tensor<T> {
 impl<T: TensorElement> fmt::Display for Tensor<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Tensor(shape={:?}, dtype={:?}, requires_grad={})", 
-               self.shape, self.dtype, self.requires_grad)?;
+               self.shape(), self.dtype(), self.requires_grad)?;
         
-        if self.data.len() <= 10 {
-            write!(f, "\ndata: {:?}", self.data.as_slice())?;
+        if self.data().len() <= 10 {
+            write!(f, "\ndata: {:?}", self.data())?;
         } else {
             write!(f, "\ndata: [{}, {}, ..., {}, {}] ({} elements)", 
-                   self.data[0], self.data[1], 
-                   self.data[self.data.len()-2], self.data[self.data.len()-1],
-                   self.data.len())?;
+                   self.data()[0], self.data()[1], 
+                   self.data()[self.data().len()-2], self.data()[self.data().len()-1],
+                   self.data().len())?;
         }
         
-        if let Some(ref grad) = self.grad {
-            write!(f, "\ngrad: Some({:?})", grad.shape)?;
+        if let Some(ref grad) = self.grad() {
+            write!(f, "\ngrad: Some({:?})", grad.shape())?;
         } else {
             write!(f, "\ngrad: None")?;
         }
