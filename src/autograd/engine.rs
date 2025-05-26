@@ -6,6 +6,31 @@ use crate::autograd::graph::{ComputationGraph, NodeId, Operation};
 use std::collections::HashMap;
 use std::sync::{Mutex, Arc, OnceLock};
 use std::any::TypeId;
+use std::cell::RefCell;
+
+/// Thread-local flag to track if we're in backward pass
+thread_local! {
+    static IN_BACKWARD_PASS: RefCell<bool> = RefCell::new(false);
+}
+
+/// Check if we're currently in a backward pass
+pub fn is_in_backward_pass() -> bool {
+    IN_BACKWARD_PASS.with(|flag| *flag.borrow())
+}
+
+/// Execute function with backward pass context
+pub fn with_backward_context<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    IN_BACKWARD_PASS.with(|flag| {
+        let old_value = *flag.borrow();
+        *flag.borrow_mut() = true;
+        let result = f();
+        *flag.borrow_mut() = old_value;
+        result
+    })
+}
 
 /// Global autograd engines storage - thread-safe initialization
 static GLOBAL_ENGINES: OnceLock<GlobalEngines> = OnceLock::new();
@@ -54,7 +79,7 @@ impl<T: TensorElement> AutogradEngine<T> {
 
     /// Check if gradients are enabled
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        self.enabled && !is_in_backward_pass()
     }
 
     /// Register a leaf tensor (requires_grad=true)
@@ -84,8 +109,8 @@ impl<T: TensorElement> AutogradEngine<T> {
         output: Tensor<T>,
         grad_fn: Box<dyn Fn(&Tensor<T>, &[&Tensor<T>]) -> Result<Vec<Tensor<T>>> + Send + Sync>,
     ) -> Result<NodeId> {
-        if !self.enabled {
-            return Err(QuasarError::invalid_operation("Autograd is disabled"));
+        if !self.is_enabled() {
+            return Err(QuasarError::invalid_operation("Autograd is disabled or in backward pass"));
         }
 
         // Add operation node
@@ -95,8 +120,9 @@ impl<T: TensorElement> AutogradEngine<T> {
 
     /// Execute backward pass from given node
     pub fn backward(&mut self, node_id: NodeId, grad_output: Tensor<T>) -> Result<()> {
-        self.graph.backward(node_id, grad_output)?;
-        Ok(())
+        with_backward_context(|| {
+            self.graph.backward(node_id, grad_output)
+        })
     }
 
     /// Get gradient for a node
@@ -111,7 +137,8 @@ impl<T: TensorElement> AutogradEngine<T> {
 
     /// Clear all gradients
     pub fn zero_grad(&mut self) {
-        self.graph.clear();
+        // Only clear gradients, not the entire graph
+        self.graph.clear_gradients();
     }
 
     /// Get graph statistics

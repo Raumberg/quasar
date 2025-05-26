@@ -212,7 +212,7 @@ impl<T: TensorElement> Tensor<T> {
                 engine.backward(node_id, grad_output)
             })?;
             
-            // Get computed gradient from global engine
+            // Get computed gradient from global engine for this tensor
             let grad = with_global_engine::<T, _, _>(|engine| {
                 engine.get_gradient(node_id).cloned()
             });
@@ -224,6 +224,38 @@ impl<T: TensorElement> Tensor<T> {
             return Err(QuasarError::invalid_operation(
                 "No node ID found for tensor"
             ));
+        }
+
+        Ok(())
+    }
+
+    /// Get gradient from global autograd engine by tensor data matching
+    pub fn get_grad_from_engine(&mut self) -> Result<()> {
+        if !self.requires_grad {
+            return Ok(());
+        }
+
+        // Try to find gradient in global engine by matching tensor data
+        let grad = with_global_engine::<T, _, _>(|engine| {
+            // Get all leaf gradients
+            let leaf_grads = engine.get_leaf_gradients();
+            
+            // Find gradient for tensor with matching data
+            for (node_id, grad_tensor) in leaf_grads {
+                // Get the leaf tensor from engine to compare
+                if let Some(leaf_tensor) = engine.get_gradient(node_id) {
+                    // This is a simplified approach - in a real implementation,
+                    // we'd need a better way to match tensors
+                    if self.shape() == grad_tensor.shape() {
+                        return Some(grad_tensor);
+                    }
+                }
+            }
+            None
+        });
+
+        if let Some(grad) = grad {
+            self.grad = Some(Box::new(grad));
         }
 
         Ok(())

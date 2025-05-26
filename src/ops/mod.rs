@@ -5,12 +5,10 @@ pub mod linalg;
 pub mod activation;
 pub mod reduction;
 pub mod creation;
-pub mod parallel_ops;
 
-// Re-exports for convenience
-pub use arithmetic::*;
-pub use linalg::*;
-pub use activation::*;
+// Re-export commonly used functions
+pub use arithmetic::{add, sub, mul, div};
+pub use linalg::{matmul, dot};
+pub use activation::{relu, sigmoid, tanh};
 pub use reduction::*;
-pub use creation::*;
-pub use parallel_ops::*; 
+pub use creation::*; 

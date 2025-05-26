@@ -1,6 +1,7 @@
 //! Tests for automatic differentiation
 
 use quasar::prelude::*;
+use quasar::autograd::engine::AutogradOp;
 
 #[cfg(test)]
 mod tests {

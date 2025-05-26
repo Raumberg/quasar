@@ -10,14 +10,15 @@ use std::cell::RefCell;
 use rayon::prelude::*;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::time::Instant;
+use std::sync::OnceLock;
 
 /// Thread-local autograd engine for independent computation
 thread_local! {
     static LOCAL_ENGINE: RefCell<Option<LocalAutogradEngine>> = RefCell::new(None);
 }
 
-/// Global coordinator for multi-threaded autograd operations
-static GLOBAL_COORDINATOR: std::sync::OnceLock<Arc<GlobalCoordinator>> = std::sync::OnceLock::new();
+/// Global coordinator instance with automatic initialization
+static GLOBAL_COORDINATOR: OnceLock<Arc<GlobalCoordinator>> = OnceLock::new();
 
 /// Configuration for parallel execution
 #[derive(Debug, Clone)]
@@ -247,21 +248,38 @@ impl GlobalCoordinator {
     pub fn get_config(&self) -> ParallelConfig {
         self.config.read().unwrap().clone()
     }
+
+    /// Check if operation should be parallelized based on tensor size
+    pub fn should_parallelize(&self, tensor_size: usize) -> bool {
+        let config = self.config.read().unwrap();
+        config.auto_parallel && tensor_size >= config.parallel_threshold
+    }
 }
 
-/// Initialize global coordinator
+/// Automatically initialize parallel autograd with optimal defaults
+fn auto_init_parallel() -> Arc<GlobalCoordinator> {
+    let config = ParallelConfig {
+        max_workers: num_cpus::get(),
+        auto_parallel: true,
+        parallel_threshold: 1000, // Optimal threshold for most workloads
+        use_thread_local: true,
+        enable_fusion: true,
+    };
+    
+    Arc::new(GlobalCoordinator::new(config))
+}
+
+/// Get global coordinator with automatic initialization
+pub fn get_global_coordinator() -> Arc<GlobalCoordinator> {
+    GLOBAL_COORDINATOR.get_or_init(auto_init_parallel).clone()
+}
+
+/// Initialize parallel autograd (optional - will auto-initialize if not called)
 pub fn init_parallel_autograd(config: ParallelConfig) -> Result<()> {
     let coordinator = Arc::new(GlobalCoordinator::new(config));
     GLOBAL_COORDINATOR.set(coordinator)
         .map_err(|_| QuasarError::invalid_operation("Parallel autograd already initialized"))?;
     Ok(())
-}
-
-/// Get global coordinator
-pub fn get_global_coordinator() -> Arc<GlobalCoordinator> {
-    GLOBAL_COORDINATOR.get_or_init(|| {
-        Arc::new(GlobalCoordinator::new(ParallelConfig::default()))
-    }).clone()
 }
 
 /// Execute with thread-local engine
@@ -324,8 +342,23 @@ pub fn parallel_matmul<T: TensorElement + Send + Sync>(
         let result_shape = crate::core::Shape::from(&[m, n]);
         Tensor::new(result_data, result_shape)
     } else {
-        // Fall back to sequential implementation
-        crate::ops::linalg::matmul(a, b)
+        // Fall back to sequential implementation - use raw implementation to avoid recursion
+        let mut result_data = vec![T::zero(); m * n];
+        
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = T::zero();
+                for l in 0..k {
+                    let a_val = a.data()[i * k + l];
+                    let b_val = b.data()[l * n + j];
+                    sum = sum + a_val * b_val;
+                }
+                result_data[i * n + j] = sum;
+            }
+        }
+        
+        let result_shape = crate::core::Shape::from(&[m, n]);
+        Tensor::new(result_data, result_shape)
     }
 }
 

@@ -347,6 +347,11 @@ impl<T: TensorElement> ComputationGraph<T> {
         self.next_id = 0;
     }
 
+    /// Clear only gradients, keeping the graph structure
+    pub fn clear_gradients(&mut self) {
+        self.gradients.clear();
+    }
+
     /// Perform automatic garbage collection if needed
     pub fn maybe_gc(&mut self) {
         if !self.config.auto_gc {
